@@ -32,6 +32,9 @@ To get started with rgdrive, just pull the repo and build it using cargo:
 # Start worker daemon
 > ./rgdrive --start
 
+# Check status of worker daemon
+> ./rgdrive --status
+
 # Push file from path to Drive, and keep it synced
 > ./rgdrive --push /home/cam/testfile.txt
 
