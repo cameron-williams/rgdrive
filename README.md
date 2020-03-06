@@ -11,7 +11,7 @@ Currently completed features:
 
 This repo is very much a work in progress, as I'm still new to Rust and there are a lot more future features I would like to add once I get more comfortable with the language.
 
-If you happen to come across this repo and have any tips/pointers/criticism on my code, I would urge you to leave me a message as I'm just looking to improve!
+If you happen to come across this repo and have any tips/pointers/criticism on my code, I would urge you to leave me a message as I know that my code is very basic, and I'm always looking to improve!
 
 
 ## Getting Started
