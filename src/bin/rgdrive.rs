@@ -214,19 +214,19 @@ fn main() {
         .version("1.0")
         .author("Cameron W. <cam@camwilliams.ca>")
         .arg(
-            Arg::with_name("start") // done (maybe add different print fmt)
+            Arg::with_name("start")
                 .long("start")
                 .help("Start the background daemon")
                 .takes_value(false),
         )
         .arg(
-            Arg::with_name("stop") // done
+            Arg::with_name("stop")
                 .long("stop")
                 .help("Stop the background daemon")
                 .takes_value(false),
         )
         .arg(
-            Arg::with_name("status") // done
+            Arg::with_name("status")
                 .long("status")
                 .help("check the current status of the background daemon"),
         )
