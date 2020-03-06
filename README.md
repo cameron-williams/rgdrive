@@ -8,6 +8,7 @@ Currently completed features:
 - Pull files from GoogleDrive (not tracked yet)
 - Automatically update file on GoogleDrive if it's updated on the local computer
 
+#####----------------------------------------------------------------------------------------------------------
 
 This repo is very much a work in progress, as I'm still new to Rust and there are a lot more future features I would like to add once I get more comfortable with the language.
 
