@@ -1,21 +1,18 @@
 extern crate clap;
-use clap::{Arg, App};
+use clap::{App, Arg};
 
 use std::env;
 
-use std::process::{Command, Stdio};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
+use std::process::{Command, Stdio};
 
 use std::fs::File;
 use std::io::prelude::*;
-use std::io::{Error, ErrorKind, stdout};
-
+use std::io::{stdout, Error, ErrorKind};
 
 use std::path::Path;
 use url::Url;
-
-
 
 const SOCKET_PATH: &str = "/tmp/rgdrive.sock";
 
@@ -23,7 +20,6 @@ const ANSI_GREEN: &str = "\x1B[32m";
 const ANSI_RED: &str = "\x1B[31m";
 const ANSI_RESET: &str = "\x1B[0m";
 const STDERR_PATH: &str = "/tmp/rgdrived.err";
-
 
 // Gets the bin path of the daemon binary. (assumes it's in the same path as this bin).
 fn get_bin_path() -> String {
@@ -33,7 +29,6 @@ fn get_bin_path() -> String {
     pb.push("rgdrived");
     String::from(pb.to_str().unwrap())
 }
-
 
 // Write given str or String to daemon socket.
 fn write_to_daemon<M: Into<String>>(msg: M) -> Result<(), Error> {
@@ -45,7 +40,9 @@ fn write_to_daemon<M: Into<String>>(msg: M) -> Result<(), Error> {
 fn daemon_is_active() -> bool {
     if let Err(_) = UnixStream::connect(SOCKET_PATH) {
         false
-    } else {true}
+    } else {
+        true
+    }
 }
 
 // Quick fmt function for errors. Pass an identifier (e.g "push_err" for push function) and the err msg and it will auto color and format.
@@ -58,64 +55,64 @@ fn fmt_err<I: Into<String>, M: Into<String>>(identifier: I, message: M) {
             identifier.into(),
             ANSI_RESET,
             message.into()
-        ).as_str()
+        )
+        .as_str()
     );
 }
 
 /// Starts the daemon process with proper settings.
 fn handle_start() {
     println!("Starting daemon.");
-        if !daemon_is_active() {
-            unsafe {
-                Command::new(get_bin_path())
-                        .env_clear()
-                        .env("RUST_LOG", "debug")
-                        .env("HOME", env::var("HOME").unwrap())
-                        .pre_exec(|| {
-                            let pid_t = libc::setsid();
-                            if pid_t < 0 {
-                                return Err(
-                                    Error::from_raw_os_error(pid_t)
-                                )
-                            }
-                            libc::umask(0);
-                            Ok(())
-                        })
-                        .current_dir("/")
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(File::create(STDERR_PATH).unwrap())
-                        .spawn()
-                        .expect("failed to init command");
-            }
-        } else { println!("daemon already running"); }
+    if !daemon_is_active() {
+        unsafe {
+            Command::new(get_bin_path())
+                .env_clear()
+                .env("RUST_LOG", "debug")
+                .env("HOME", env::var("HOME").unwrap())
+                .pre_exec(|| {
+                    let pid_t = libc::setsid();
+                    if pid_t < 0 {
+                        return Err(Error::from_raw_os_error(pid_t));
+                    }
+                    libc::umask(0);
+                    Ok(())
+                })
+                .current_dir("/")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(File::create(STDERR_PATH).unwrap())
+                .spawn()
+                .expect("failed to init command");
+        }
+    } else {
+        println!("daemon already running");
+    }
 }
 
 /// Stops the active daemon.
 fn handle_stop() {
     print!("Stopping daemon...");
-        stdout().flush().unwrap();
-        match write_to_daemon("quit") {
-            Err(e) => match e.kind() {
-                ErrorKind::ConnectionRefused => print!(" Already stopped.\n"),
-                _ => {
-                    print!(" Error\n");
-                    eprintln!("Error stopping daemon: {}", e)
-                }
-            },
-            Ok(_) => print!(" Stopped.\n"),
-        }
-        stdout().flush().unwrap()  
+    stdout().flush().unwrap();
+    match write_to_daemon("quit") {
+        Err(e) => match e.kind() {
+            ErrorKind::ConnectionRefused => print!(" Already stopped.\n"),
+            _ => {
+                print!(" Error\n");
+                eprintln!("Error stopping daemon: {}", e)
+            }
+        },
+        Ok(_) => print!(" Stopped.\n"),
+    }
+    stdout().flush().unwrap()
 }
 
 /// Handler for the file pull command.
 /// Expects vals to be Vec<url, local_path>
 fn handle_pull(vals: Vec<&str>, overwrite: bool) {
-    
     // Ensure given url is valid.
     if let Err(_) = Url::parse(vals[0]) {
         fmt_err("pull_error", format!("Invalid pull url: {}", vals[0]));
-        return
+        return;
     };
 
     let p = Path::new(vals[1]);
@@ -129,23 +126,20 @@ fn handle_pull(vals: Vec<&str>, overwrite: bool) {
                     vals[1]
                 )
             );
-            return
+            return;
         }
     } else {
         // If is a dir and doesn't exist warn user and break.
         if p.extension() == None && !p.is_dir() {
-            fmt_err("pull_error", format!("Destination {} doesn't exist.", vals[1]));
-            return
+            fmt_err(
+                "pull_error",
+                format!("Destination {} doesn't exist.", vals[1]),
+            );
+            return;
         }
     }
 
-    write_to_daemon(
-        format!(
-            "pull>{}>{}",
-            vals[0],
-            vals[1]
-        )
-    ).unwrap();
+    write_to_daemon(format!("pull>{}>{}", vals[0], vals[1])).unwrap();
 }
 
 /// Handler for the file push command.
@@ -155,17 +149,17 @@ fn handle_push(p: &str) {
     // Ensure path is valid and that a file exists there.
     let p = Path::new(p);
     if !p.exists() {
-        fmt_err("push_error", format!("{} doesn't exist. Please check you rpath and try again.", p.display()));
-        return
+        fmt_err(
+            "push_error",
+            format!(
+                "{} doesn't exist. Please check you rpath and try again.",
+                p.display()
+            ),
+        );
+        return;
     }
-    
     // Send push command to daemon.
-    write_to_daemon(
-        format!(
-            "push>{}",
-            p.display()
-        )
-    ).unwrap()
+    write_to_daemon(format!("push>{}", p.display())).unwrap()
 }
 
 /// Handler for the file status command.
@@ -174,7 +168,8 @@ fn handle_status() {
     // Read rgdrived.err to stdout. Todo:// cut it to only be the last 5-10 lines of logs?
     let mut f = File::open(STDERR_PATH).unwrap();
     let mut log_lines = String::new();
-    f.read_to_string(&mut log_lines).expect("failed to read rgdrived.err to string");
+    f.read_to_string(&mut log_lines)
+        .expect("failed to read rgdrived.err to string");
 
     // Add header with daemon status.
     if daemon_is_active() {
@@ -188,62 +183,73 @@ fn handle_status() {
     stdout().flush().unwrap();
 }
 
-
 fn main() {
     let matches = App::new("rgdrive")
-                        .version("1.0")
-                        .author("Cameron W. <cam@camwilliams.ca>")
-                        .arg(Arg::with_name("start") // done (maybe add different print fmt)
-                                .long("start")
-                                .help("Start the background daemon")
-                                .takes_value(false))
-                        .arg(Arg::with_name("stop") // done
-                                .long("stop")
-                                .help("Stop the background daemon")
-                                .takes_value(false))
-                        .arg(Arg::with_name("status") // done
-                                .long("status")
-                                .help("check the current status of the background daemon"))
-                        .arg(Arg::with_name("pull")
-                                .long("pull")
-                                .value_names(&["gdrive_url", "/local/path/to/put/to"])
-                                .number_of_values(2))
-                        .arg(Arg::with_name("push")
-                                .long("push")
-                                .takes_value(true)
-                                .value_name("/path/of/file/to/push"))
-                        .arg(Arg::with_name("msg")
-                                .long("msg")
-                                .takes_value(true))
-                        .arg(Arg::with_name("overwrite")
-                                .long("overwrite")
-                                .takes_value(false))
-                        .get_matches();
-
+        .version("1.0")
+        .author("Cameron W. <cam@camwilliams.ca>")
+        .arg(
+            Arg::with_name("start") // done (maybe add different print fmt)
+                .long("start")
+                .help("Start the background daemon")
+                .takes_value(false),
+        )
+        .arg(
+            Arg::with_name("stop") // done
+                .long("stop")
+                .help("Stop the background daemon")
+                .takes_value(false),
+        )
+        .arg(
+            Arg::with_name("status") // done
+                .long("status")
+                .help("check the current status of the background daemon"),
+        )
+        .arg(
+            Arg::with_name("pull")
+                .long("pull")
+                .value_names(&["gdrive_url", "/local/path/to/put/to"])
+                .number_of_values(2),
+        )
+        .arg(
+            Arg::with_name("push")
+                .long("push")
+                .takes_value(true)
+                .value_name("/path/of/file/to/push"),
+        )
+        .arg(Arg::with_name("msg").long("msg").takes_value(true))
+        .arg(
+            Arg::with_name("overwrite")
+                .long("overwrite")
+                .takes_value(false),
+        )
+        .get_matches();
 
     // Starts the daemon. Put all fds to null except stderr which gets written to STDERR_PATH.
     // Todo:// maybe add a 2nd fork so the forked process isn't it's sesssion leader?
     if matches.occurrences_of("start") > 0 {
         handle_start();
-        return
+        return;
     }
 
     // Print current daemon status and daemon logs to stdout.
     if matches.occurrences_of("status") > 0 {
         handle_status();
-        return
+        return;
     }
 
     // Stops the daemon process.
     if matches.occurrences_of("stop") > 0 {
         handle_stop();
-        return
+        return;
     }
 
     // Any further functions require an active daemon. Check here and error out if not active.
     if !daemon_is_active() {
-        fmt_err("error", "Daemon is not active, Please start it with `rgdrive --start`");
-        return
+        fmt_err(
+            "error",
+            "Daemon is not active, Please start it with `rgdrive --start`",
+        );
+        return;
     }
 
     // Testing function, write a msg to the daemon.
@@ -260,7 +266,6 @@ fn main() {
     if let Some(v) = matches.values_of("pull") {
         let vals: Vec<&str> = v.collect();
         let overwrite = matches.occurrences_of("overwrite") == 1;
-       handle_pull(vals, overwrite);
+        handle_pull(vals, overwrite);
     }
-
 }

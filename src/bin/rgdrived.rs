@@ -1,30 +1,29 @@
 // rgdrived is the daemon that powers the backend and syncing of rgdrive.
-#[macro_use] extern crate log;
+#[macro_use]
+extern crate log;
 
 use std::env;
 use std::path::{Path, PathBuf};
 
-use std::os::unix::net::{UnixStream, UnixListener};
 use std::fs;
 use std::fs::{create_dir_all, File, OpenOptions};
-use std::io::{BufReader, BufWriter};
 use std::io::prelude::*;
+use std::io::{BufReader, BufWriter};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::process;
 
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
 
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use std::time::Duration;
 
-use inotify::{Inotify, WatchMask, EventMask, WatchDescriptor};
 use google_api::Drive;
-
+use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
 
 const SOCKET_PATH: &str = "/tmp/rgdrive.sock";
 const CONFIG_PATH: &str = "/.config/cameron-williams/tracked_files";
-
 
 fn config_dir() -> PathBuf {
     let mut dir = env::var("HOME").expect("$HOME not set");
@@ -38,11 +37,15 @@ fn get_stream_text(s: &mut UnixStream) -> String {
     resp
 }
 
-
-fn handle_stream(stream: &mut UnixStream, drive: Arc<Mutex<Drive>>, notify: Arc<Mutex<Inotify>>, tracked_files: Arc<Mutex<TrackedFiles>>) {
+fn handle_stream(
+    stream: &mut UnixStream,
+    drive: Arc<Mutex<Drive>>,
+    notify: Arc<Mutex<Inotify>>,
+    tracked_files: Arc<Mutex<TrackedFiles>>,
+) {
     let text = get_stream_text(stream);
     if text.len() == 0 {
-        return
+        return;
     }
     let cmd: Vec<&str> = text.split(">").collect();
     debug!("Cmd: {:?}", cmd);
@@ -51,47 +54,40 @@ fn handle_stream(stream: &mut UnixStream, drive: Arc<Mutex<Drive>>, notify: Arc<
 
     // Match command to requested action.
     match cmd[0] {
-
         "quit" => {
             info!("Quit command received. Quitting dameon.");
             process::exit(0);
-        },
+        }
 
         "push" => {
             debug!("Push command received: {:?}", cmd);
             // Upload file to drive.
-            let url = match drive.upload_file(
-                PathBuf::from(cmd[1])
-            ) {
+            let url = match drive.upload_file(PathBuf::from(cmd[1])) {
                 Ok(url) => {
                     info!("uploaded {} successfully", cmd[1]);
                     url
-                },
+                }
                 Err(e) => {
                     error!("failed to upload {}: {:?}", cmd[1], e);
-                    return
-                },
+                    return;
+                }
             };
             // After a successful upload, add path to TrackedFiles for modify/delete masks.
             tracked_files.lock().unwrap().add_path(notify, cmd[1], url);
-        
-        },
+        }
 
         "pull" => {
             debug!("Pull command received: {:?}", cmd);
-            match drive.download_file(
-                cmd[1],
-                PathBuf::from(cmd[2])
-            ) {
+            match drive.download_file(cmd[1], PathBuf::from(cmd[2])) {
                 Ok(_) => info!("downloaded {} successfully", cmd[1]),
                 Err(e) => {
                     error!("failed to download {}: {:?}", cmd[1], e);
-                    return
-                },
+                    return;
+                }
             }
         }
 
-        _ => ()
+        _ => (),
     }
 }
 
@@ -110,8 +106,7 @@ fn write_saved_inotify_events(e: &HashMap<WatchDescriptor, String>) {
         }
     }
     let mut vals = Vec::new();
-    e.values().for_each(|i| {vals.push(i)});
-    
+    e.values().for_each(|i| vals.push(i));
     match OpenOptions::new()
         .read(true)
         .write(true)
@@ -125,17 +120,24 @@ fn write_saved_inotify_events(e: &HashMap<WatchDescriptor, String>) {
                     "error writing/serializing config to file: {:#?}",
                     e
                 ));
-            } 
+            }
         }
         Err(e) => panic!(format!("error opening config file in write mode: {:#?}", e)),
     }
 }
 
-
-fn inotify_listen(notify: Arc<Mutex<Inotify>>, drive: Arc<Mutex<Drive>>, tracked_files: Arc<Mutex<TrackedFiles>>) {
+fn inotify_listen(
+    notify: Arc<Mutex<Inotify>>,
+    drive: Arc<Mutex<Drive>>,
+    tracked_files: Arc<Mutex<TrackedFiles>>,
+) {
     let mut buffer = [0; 1024];
     loop {
-        let events = notify.lock().unwrap().read_events(&mut buffer).expect("Failed to read inotify events");
+        let events = notify
+            .lock()
+            .unwrap()
+            .read_events(&mut buffer)
+            .expect("Failed to read inotify events");
 
         for event in events {
             match event.mask {
@@ -145,17 +147,20 @@ fn inotify_listen(notify: Arc<Mutex<Inotify>>, drive: Arc<Mutex<Drive>>, tracked
                         Some(p) => p.split(",").collect(),
                         None => {
                             error!("no matching entry in saved wds for {:?}", event.wd);
-                            continue
-                        },
+                            continue;
+                        }
                     };
                     debug!("modify event: {:#?}\nEntry: {:#?}", event.wd, path);
-                    match drive.lock().unwrap().update_file(PathBuf::from(path[0]), path[1]) {
+                    match drive
+                        .lock()
+                        .unwrap()
+                        .update_file(PathBuf::from(path[0]), path[1])
+                    {
                         Ok(_) => info!("Successfully updated file: {:?}", path),
                         Err(e) => error!("Error updating file {:?}: {:?}", path, e),
                     }
-                    
-                },
-                EventMask::DELETE => {},
+                }
+                EventMask::DELETE => {}
                 _ => {}
             }
         }
@@ -163,11 +168,9 @@ fn inotify_listen(notify: Arc<Mutex<Inotify>>, drive: Arc<Mutex<Drive>>, tracked
     }
 }
 
-
-
 struct TrackedFiles {
     // Holds {WD: String("path,drive_url")
-    map: HashMap<WatchDescriptor, String>
+    map: HashMap<WatchDescriptor, String>,
 }
 
 impl TrackedFiles {
@@ -205,44 +208,55 @@ impl TrackedFiles {
 
         for p in &paths {
             let vals: Vec<&str> = p.split(",").collect();
-            match notify.lock().unwrap().add_watch(vals[0], WatchMask::MODIFY | WatchMask::DELETE) {
+            match notify
+                .lock()
+                .unwrap()
+                .add_watch(vals[0], WatchMask::MODIFY | WatchMask::DELETE)
+            {
                 Ok(wd) => {
                     debug!("{} added to Inotify watchlist successfully", p);
                     map.insert(wd, p.to_string())
-                },
+                }
                 Err(e) => {
                     error!("failed to add {} to the Inotify watchlist: {:?}", p, e);
-                    continue
-                },
+                    continue;
+                }
             };
         }
         info!("{:#?}", map);
 
-        Self {map}
+        Self { map }
     }
 
     /// Adds given path to Inotify watch, as well as tracked files map.
-    fn add_path<P: Into<String>, U: Into<String>>(&mut self, notify: Arc<Mutex<Inotify>>, path: P, url: U) {
+    fn add_path<P: Into<String>, U: Into<String>>(
+        &mut self,
+        notify: Arc<Mutex<Inotify>>,
+        path: P,
+        url: U,
+    ) {
         let path = path.into();
         let url = url.into();
-        match notify.lock().unwrap().add_watch(path.clone(), WatchMask::MODIFY | WatchMask::DELETE) {
+        match notify
+            .lock()
+            .unwrap()
+            .add_watch(path.clone(), WatchMask::MODIFY | WatchMask::DELETE)
+        {
             Ok(wd) => {
                 debug!("{} added to Inotify watchlist successfully", path);
                 self.map.insert(wd, format!("{},{}", path, url));
-            },
+            }
             Err(e) => {
                 error!("failed to add {} to the Inotify watchlist: {:?}", path, e);
-                return
-            },
+                return;
+            }
         }
         write_saved_inotify_events(&self.map)
     }
 }
 
-
 fn main() {
     env_logger::init();
-    
     // Check if socket exists already, if it does delete it.
     let socket = Path::new(SOCKET_PATH);
     if socket.exists() {
@@ -254,7 +268,7 @@ fn main() {
         Ok(s) => s,
         Err(e) => {
             error!("Couldn't listen on socket: {:#?}", e);
-            return
+            return;
         }
     };
     info!("Daemon initialized");
@@ -263,11 +277,14 @@ fn main() {
     let drive = match Drive::new(
         String::from("1979642470-56gn3t87ibds6kllqp6rqu09im00qj5i.apps.googleusercontent.com"),
         String::from("PekwZar1ZaqSjWRz7A2PMkaF"),
-        None
+        None,
     ) {
         Ok(d) => Arc::new(Mutex::new(d)),
         Err(e) => {
-            error!("Error initializing Drive API client: {:#?}. Unable to continue.", e);
+            error!(
+                "Error initializing Drive API client: {:#?}. Unable to continue.",
+                e
+            );
             process::exit(1);
         }
     };
@@ -276,7 +293,10 @@ fn main() {
     let inotify: Arc<Mutex<Inotify>> = match Inotify::init() {
         Ok(i) => Arc::new(Mutex::new(i)),
         Err(e) => {
-            error!("Error initializing Inotify wrapped: {:#?}. Unable to continue", e);
+            error!(
+                "Error initializing Inotify wrapped: {:#?}. Unable to continue",
+                e
+            );
             process::exit(1);
         }
     };
@@ -297,12 +317,17 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(mut s) => {
-                handle_stream(&mut s, Arc::clone(&drive), Arc::clone(&inotify), Arc::clone(&tracked_files));
-            },
+                handle_stream(
+                    &mut s,
+                    Arc::clone(&drive),
+                    Arc::clone(&inotify),
+                    Arc::clone(&tracked_files),
+                );
+            }
             Err(e) => {
                 error!("stream err: {:?}", e);
                 // maybe switch break to process::quit?
-                break
+                break;
             }
         }
     }
