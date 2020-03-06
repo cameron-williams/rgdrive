@@ -57,6 +57,11 @@ A unix-based operating system (haven't testing on OSX)
 > follow any prompt
 ```
 
+
+### Repo
+
+In earlier commits there was a GOOGLE_CLIENT_SECRET value that was commited. It is now invalid so no point in trying it.
+
 ## Authors
 
 * **Cameron Williams**  - [Github](https://github.com/cameron-williams)
