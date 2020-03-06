@@ -275,8 +275,8 @@ fn main() {
 
     // Initialize gdrive api client.
     let drive = match Drive::new(
-        String::from("1979642470-56gn3t87ibds6kllqp6rqu09im00qj5i.apps.googleusercontent.com"),
-        String::from("PekwZar1ZaqSjWRz7A2PMkaF"),
+        String::from(env::var("GOOGLE_CLIENT_ID").unwrap()),
+        String::from(env::var("GOOGLE_CLIENT_SECRET").unwrap()),
         None,
     ) {
         Ok(d) => Arc::new(Mutex::new(d)),

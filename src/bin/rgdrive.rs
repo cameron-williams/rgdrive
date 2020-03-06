@@ -63,12 +63,38 @@ fn fmt_err<I: Into<String>, M: Into<String>>(identifier: I, message: M) {
 /// Starts the daemon process with proper settings.
 fn handle_start() {
     println!("Starting daemon.");
+    
+    // Ensure client id and secret are set in $ENV.
+    let (client_id, secret) = match (
+        env::var("GOOGLE_CLIENT_ID"),
+        env::var("GOOGLE_CLIENT_SECRET"),
+    ) {
+        (Ok(id), Ok(secret)) => (id, secret),
+        (Ok(_), _) => {
+            fmt_err("start_error", "$GOOGLE_CLIENT_SECRET is not set");
+            return;
+        }
+        (_, Ok(_)) => {
+            fmt_err("start_error", "$GOOGLE_CLIENT_ID is not set");
+            return;
+        }
+        (_, _) => {
+            fmt_err(
+                "start_error",
+                "$GOOGLE_CLIENT_ID and $GOOGLE_CLIENT_SECRET are not set",
+            );
+            return;
+        }
+    };
+
     if !daemon_is_active() {
         unsafe {
             Command::new(get_bin_path())
                 .env_clear()
                 .env("RUST_LOG", "debug")
                 .env("HOME", env::var("HOME").unwrap())
+                .env("GOOGLE_CLIENT_ID", client_id)
+                .env("GOOGLE_CLIENT_SECRET", secret)
                 .pre_exec(|| {
                     let pid_t = libc::setsid();
                     if pid_t < 0 {
