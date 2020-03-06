@@ -50,8 +50,11 @@ To run rgdrive you will need the following:
 ```
 rust >= 1.39.0
 cargo >= 1.39.0
-
 A unix-based operating system (haven't testing on OSX)
+
+# Download rust/cargo using rustup
+> curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+> follow any prompt
 ```
 
 ## Authors
