@@ -314,7 +314,7 @@ impl TrackedFiles {
         Self { map }
     }
 
-    /// Adds given path to Inotify watch, as well as tracked files map. Todo:// Add support for adding whole directories
+    /// Adds given path to Inotify watch, as well as tracked files map.
     fn add_path<P: Into<String>, U: Into<String>>(
         &mut self,
         notify: Arc<Mutex<Inotify>>,
