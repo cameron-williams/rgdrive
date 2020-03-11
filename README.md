@@ -4,9 +4,9 @@ rgdrive is a command line tool useful for syncing files between the local comput
 
 
 Currently completed features:
-- Push local files to GoogleDrive and track them
-- Pull files from GoogleDrive (not tracked yet)
-- Automatically update file on GoogleDrive if it's updated on the local computer
+- Push local files to GoogleDrive and keep their contents synced.
+- Pull files from GoogleDrive and keep them synced.
+- Manually sync/unsync files/drive urls.
 
 #####----------------------------------------------------------------------------------------------------------
 
