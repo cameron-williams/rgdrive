@@ -16,8 +16,9 @@ use std::collections::{HashMap, HashSet};
 
 use std::sync::{Arc, Mutex};
 use std::thread;
-
 use std::time::Duration;
+
+// use serde::{Deserialize, Serialize};
 
 use google_api::Drive;
 use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
@@ -59,27 +60,50 @@ fn handle_stream(
             process::exit(0);
         }
 
+        // Push: cmd[1] - local path (file or dir) to upload
         "push" => {
             debug!("Push command received: {:?}", cmd);
-            // Upload file to drive.
-            let url = match drive.upload_file(PathBuf::from(cmd[1])) {
-                Ok(url) => {
-                    info!("uploaded {} successfully", cmd[1]);
-                    url
+            let upload_path = PathBuf::from(cmd[1]);
+
+            // If given path is a dir, upload everything in it.
+            if upload_path.is_dir() {
+                for f in upload_path.read_dir().unwrap() {
+                    let path = f.unwrap().path();
+                    match drive.upload_file(&path) {
+                        Ok(url) => {
+                            info!("Uploaded {:?}", path.to_str());
+                            tracked_files.lock().unwrap().add_path(Arc::clone(&notify), path.to_str().unwrap(), url)
+                        },
+                        Err(e) => {
+                            error!("Failed to upload {:?}: {:?}", path, e);
+                            continue
+                        }
+                    }
                 }
-                Err(e) => {
-                    error!("failed to upload {}: {:?}", cmd[1], e);
-                    return;
+            } else {
+                match drive.upload_file(&upload_path) {
+                    Ok(url) => {
+                        info!("Uploaded {:?}", upload_path);
+                        tracked_files.lock().unwrap().add_path(notify, cmd[1], url);
+                    },
+                    Err(e) => {error!("failed to upload {}: {:?}", cmd[1], e); return;}
                 }
-            };
-            // After a successful upload, add path to TrackedFiles for modify/delete masks.
-            tracked_files.lock().unwrap().add_path(notify, cmd[1], url);
+            }
         }
 
+        // Pull: cmd[1] - Drive url, cmd[2] - local path to download to
         "pull" => {
             debug!("Pull command received: {:?}", cmd);
-            match drive.download_file(cmd[1], PathBuf::from(cmd[2])) {
-                Ok(_) => info!("downloaded {} successfully", cmd[1]),
+            let path = PathBuf::from(cmd[2]);
+
+            // Attempt to download file from Drive.
+            match drive.download_file(cmd[1], path) {
+                Ok(path) => {
+                    info!("downloaded {} successfully", cmd[1]);
+                    let path = path.to_str().unwrap();
+                    // On successful download, add path to TrackedFile for modify/delete masks.
+                    tracked_files.lock().unwrap().add_path(notify, path, cmd[1]);
+                }
                 Err(e) => {
                     error!("failed to download {}: {:?}", cmd[1], e);
                     return;
@@ -87,11 +111,33 @@ fn handle_stream(
             }
         }
 
+        // Sync: cmd[1] - /path/locally, cmd[2] - drive_url
+        "sync" => {
+            // Manually adds a synced file between specified path/drive_url.
+            tracked_files
+                .lock()
+                .unwrap()
+                .add_path(notify, cmd[1], cmd[2]);
+            info!("Sync added for {} -> {}", cmd[1], cmd[2]);
+        }
+
+        "unsync" => {
+            // Manually remove syncs that have specified local path.
+            tracked_files.lock().unwrap().remove_path(notify, cmd[1]);
+            info!("Sync removed for {}", cmd[1]);
+        }
+
         _ => (),
     }
 }
 
-/// Write paths that need to be tracked to config file from TrackedFiles.map (HashMap<wd, String>)
+/// Write paths that need to be tracked to config file from TrackedFiles map (HashMap<wd, String>)
+/// Inotify watched paths do not persist through sessions. As such we need a way to save tracked paths
+/// throughout any number of sessions. To do this we keep a mirrored list in a file of all paths that are
+/// tracked. Whenever a path is tracked, it's written to the file, and when one is removed it will also be removed
+/// from the file.
+///
+/// Since we need to save the drive id/url as well as the local path, the format for storing tracked files
 fn write_saved_inotify_events(e: &HashMap<WatchDescriptor, String>) {
     // Ensure config path exists. If it doesn't create it.
     let path = config_dir();
@@ -126,12 +172,14 @@ fn write_saved_inotify_events(e: &HashMap<WatchDescriptor, String>) {
     }
 }
 
+/// Listens forever for inotify events.
 fn inotify_listen(
     notify: Arc<Mutex<Inotify>>,
     drive: Arc<Mutex<Drive>>,
     tracked_files: Arc<Mutex<TrackedFiles>>,
 ) {
     let mut buffer = [0; 1024];
+    debug!("waiting for events..");
     loop {
         let events = notify
             .lock()
@@ -167,6 +215,44 @@ fn inotify_listen(
         thread::sleep(Duration::from_millis(500));
     }
 }
+
+// // Represents a tracked path.
+// #[derive(Serialize, Deserialize)]
+// struct TrackedPath {
+//     drive_url: String,
+//     path: PathBuf,
+//     #[serde(skip)]
+//     wd: Option<WatchDescriptor>,
+// }
+
+// impl TrackedPath {
+
+//     fn new<P: Into<PathBuf>, U: Into<String>>(path: P, url: U) -> TrackedPath {
+//         TrackedPath {
+//             drive_url: url.into(),
+//             path: path.into(),
+//             wd: None
+//         }
+//     }
+
+//     // Adds self to Inotify watchlist. (This must be done every time object is loaded from save).
+//     fn add_to_watchlist(&mut self, n: Arc<Mutex<Inotify>>) {
+//         match n.lock()
+//                 .unwrap()
+//                 .add_watch(self.path.clone(), WatchMask::MODIFY | WatchMask::DELETE)
+//         {
+//             Ok(wd) => {
+//                 debug!("{:?} added to Inotify watchlist", self.path);
+//                 self.wd = Some(wd);
+//             },
+//             Err(e) => {
+//                 error!("failed to add {:?} to the Inotify watchlist: {:?}", self.path, e);
+//                 return;
+//             }
+//         }
+//     }
+
+// }
 
 struct TrackedFiles {
     // Holds {WD: String("path,drive_url")
@@ -223,12 +309,12 @@ impl TrackedFiles {
                 }
             };
         }
-        info!("{:#?}", map);
+        debug!("{:#?}", map);
 
         Self { map }
     }
 
-    /// Adds given path to Inotify watch, as well as tracked files map.
+    /// Adds given path to Inotify watch, as well as tracked files map. Todo:// Add support for adding whole directories
     fn add_path<P: Into<String>, U: Into<String>>(
         &mut self,
         notify: Arc<Mutex<Inotify>>,
@@ -252,6 +338,26 @@ impl TrackedFiles {
             }
         }
         write_saved_inotify_events(&self.map)
+    }
+
+    /// Removes any inotify watches that include given path.
+    fn remove_path<P: Into<String>>(&mut self, notify: Arc<Mutex<Inotify>>, p: P) {
+        let path = p.into();
+
+        // Find entries to remove, and remove them. Todo:// find a better way to do this because I can't figure out a better way
+        // to remove a key from a dict/remove it from the watcher by checking to see if values match.
+        let mut _map: HashMap<WatchDescriptor, String> = HashMap::new();
+        for (wd, v) in self.map.drain() {
+            if v.contains(&path) {
+                // todo change from unwrap to handling error
+                notify.lock().unwrap().rm_watch(wd).unwrap();
+                debug!("{} removed from Inotify watchlist successfully", v);
+            } else {
+                _map.insert(wd, v);
+            }
+        }
+        self.map.extend(_map);
+        write_saved_inotify_events(&self.map);
     }
 }
 
