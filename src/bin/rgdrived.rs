@@ -38,14 +38,12 @@ fn get_stream_text(s: &mut UnixStream) -> String {
     resp
 }
 
-
 struct ServerUDSocketMessage {
     stream: UnixStream,
-    _timeout: u64
+    _timeout: u64,
 }
 
 impl ServerUDSocketMessage {
-
     // Initialize self from existing UnixStream with default timeout.
     fn from_stream(stream: UnixStream) -> ServerUDSocketMessage {
         Self {
@@ -65,9 +63,8 @@ impl ServerUDSocketMessage {
     fn get_body(&mut self) -> Result<String, Error> {
         let mut body = String::new();
         // Read timeout should never occur, but set it just in case.
-        self.stream.set_read_timeout(
-            Some(Duration::from_secs(self._timeout))
-        )?;
+        self.stream
+            .set_read_timeout(Some(Duration::from_secs(self._timeout)))?;
         self.stream.read_to_string(&mut body)?;
         Ok(body)
     }
@@ -76,16 +73,12 @@ impl ServerUDSocketMessage {
     fn send_response<M: Into<String>>(&mut self, m: M) -> Result<(), Error> {
         let msg = m.into();
         // Set 15s write timeout in case the client isn't reading for some reason.
-        self.stream.set_write_timeout(
-            Some(Duration::from_secs(self._timeout))
-        )?;
+        self.stream
+            .set_write_timeout(Some(Duration::from_secs(self._timeout)))?;
         self.stream.write_all(msg.as_bytes())?;
         Ok(())
     }
-
 }
-
-
 
 fn handle_stream(
     stream: UnixStream,
@@ -111,12 +104,11 @@ fn handle_stream(
             if cmd[1].contains("ping") {
                 stream.send_response("pong").unwrap();
             }
-        },
-        
+        }
         "quit" => {
             info!("Quit command received. Quitting dameon.");
             process::exit(0);
-        },
+        }
 
         // Push: cmd[1] - local path (file or dir) to upload
         "push" => {
@@ -130,11 +122,15 @@ fn handle_stream(
                     match drive.upload_file(&path) {
                         Ok(url) => {
                             info!("Uploaded {:?}", path.to_str());
-                            tracked_files.lock().unwrap().add_path(Arc::clone(&notify), path.to_str().unwrap(), url)
-                        },
+                            tracked_files.lock().unwrap().add_path(
+                                Arc::clone(&notify),
+                                path.to_str().unwrap(),
+                                url,
+                            )
+                        }
                         Err(e) => {
                             error!("Failed to upload {:?}: {:?}", path, e);
-                            continue
+                            continue;
                         }
                     }
                 }
@@ -143,11 +139,14 @@ fn handle_stream(
                     Ok(url) => {
                         info!("Uploaded {:?}", upload_path);
                         tracked_files.lock().unwrap().add_path(notify, cmd[1], url);
-                    },
-                    Err(e) => {error!("failed to upload {}: {:?}", cmd[1], e); return;}
+                    }
+                    Err(e) => {
+                        error!("failed to upload {}: {:?}", cmd[1], e);
+                        return;
+                    }
                 }
             }
-        },
+        }
 
         // Pull: cmd[1] - Drive url, cmd[2] - local path to download to
         "pull" => {
@@ -167,7 +166,7 @@ fn handle_stream(
                     return;
                 }
             }
-        },
+        }
 
         // Sync: cmd[1] - /path/locally, cmd[2] - drive_url
         "sync" => {
@@ -183,7 +182,7 @@ fn handle_stream(
             // Manually remove syncs that have specified local path.
             tracked_files.lock().unwrap().remove_path(notify, cmd[1]);
             info!("Sync removed for {}", cmd[1]);
-        },
+        }
 
         _ => (),
     }
@@ -273,7 +272,6 @@ fn inotify_listen(
         thread::sleep(Duration::from_millis(500));
     }
 }
-
 
 struct TrackedFiles {
     // Holds {WD: String("path,drive_url")
