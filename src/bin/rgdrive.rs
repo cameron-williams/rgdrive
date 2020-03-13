@@ -49,7 +49,7 @@ struct ClientUDSocketMessage {
     socket: String,
     _expects_resp: bool,
     _stream: Option<UnixStream>,
-    _timeout: u8,
+    _timeout: u64,
 }
 
 impl ClientUDSocketMessage {
@@ -82,7 +82,7 @@ impl ClientUDSocketMessage {
     }
 
     // Set timeout from given u8. (secs)
-    fn set_timeout(self, t: u8) -> ClientUDSocketMessage {
+    fn set_timeout(self, t: u64) -> ClientUDSocketMessage {
         ClientUDSocketMessage {
             _timeout: t,
             ..self
@@ -95,7 +95,7 @@ impl ClientUDSocketMessage {
 
         // Connect to the UD Socket.
         let mut stream = UnixStream::connect(
-            self.socket.clone()
+            &self.socket
         )?;
 
         // Write message to stream.
@@ -106,8 +106,12 @@ impl ClientUDSocketMessage {
         // If message expects a response, shutdown our sender write half of the connection so the server doesn't block waiting for socket EOF.
         // Also set the read_timeout so we don't block forever if for some reason the server side doesn't respond.
         if self._expects_resp {
+            // Shutdown write side of pipe so server doesn't hang forever on writing back. 
             stream.shutdown(Shutdown::Write)?;
-            stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+            // Set timeout just in case the server runs into an error before responding.
+            stream.set_read_timeout(
+                Some(Duration::from_secs(self._timeout))
+            )?;
             self._stream = Some(stream);
         } else {
             stream.shutdown(Shutdown::Both)?;
