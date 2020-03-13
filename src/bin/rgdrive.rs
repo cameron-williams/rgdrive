@@ -3,6 +3,7 @@ use clap::{App, Arg};
 
 use std::collections::HashSet;
 use std::env;
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -14,6 +15,8 @@ use std::io::{stdout, BufReader, Error, ErrorKind};
 
 use std::path::Path;
 use url::Url;
+
+use std::time::Duration;
 
 const SOCKET_PATH: &str = "/tmp/rgdrive.sock";
 const CONFIG_PATH: &str = "/.config/cameron-williams/tracked_files";
@@ -39,11 +42,96 @@ fn get_bin_path() -> String {
     String::from(pb.to_str().unwrap())
 }
 
-// Write given str or String to daemon socket.
-fn write_to_daemon<M: Into<String>>(msg: M) -> Result<(), Error> {
-    let mut s = UnixStream::connect(SOCKET_PATH)?;
-    s.write_all(msg.into().as_bytes())
+
+#[derive(Debug)]
+struct ClientUDSocketMessage {
+    body: Option<String>,
+    socket: String,
+    _expects_resp: bool,
+    _stream: Option<UnixStream>,
+    _timeout: u8,
 }
+
+impl ClientUDSocketMessage {
+
+    // Create a new ClientUDSocketMessage for given socket path.
+    fn new<P: Into<String>>(p: P) -> ClientUDSocketMessage {
+        ClientUDSocketMessage {
+            body: None,
+            socket: p.into(),
+            _expects_resp: true,
+            _stream: None,
+            _timeout: 15
+        }
+    }
+
+    // Set the message body.
+    fn body<M: Into<String>>(self, message: M) -> ClientUDSocketMessage {
+        ClientUDSocketMessage {
+            body: Some(message.into()),
+            ..self
+        }
+    }
+
+    // Sets the Message to expect a response after sending. (close write side of Stream).
+    fn expects_response(self, b: bool) -> ClientUDSocketMessage {
+        ClientUDSocketMessage {
+            _expects_resp: b,
+            ..self
+        }
+    }
+
+    // Set timeout from given u8. (secs)
+    fn set_timeout(self, t: u8) -> ClientUDSocketMessage {
+        ClientUDSocketMessage {
+            _timeout: t,
+            ..self
+        }
+    }
+
+    // Sends the current SocketMessage.
+    fn send(&mut self) -> Result<(), Error> {
+        if let None = self.body { return Ok(()) }
+
+        // Connect to the UD Socket.
+        let mut stream = UnixStream::connect(
+            self.socket.clone()
+        )?;
+
+        // Write message to stream.
+        stream.write_all(
+            self.body.as_ref().unwrap().as_bytes()
+        )?;
+
+        // If message expects a response, shutdown our sender write half of the connection so the server doesn't block waiting for socket EOF.
+        // Also set the read_timeout so we don't block forever if for some reason the server side doesn't respond.
+        if self._expects_resp {
+            stream.shutdown(Shutdown::Write)?;
+            stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+            self._stream = Some(stream);
+        } else {
+            stream.shutdown(Shutdown::Both)?;
+        }
+        
+        Ok(())
+        
+    }
+
+
+    // Wait for stream response (within timeout). Maybe change this function to consume self?
+    fn wait_for_response(&mut self) -> Result<String, Error> {
+        let mut response = String::new();
+        if let None = self._stream { return Ok(response) }
+
+        let mut stream = self._stream.take().unwrap();
+        stream.read_to_string(&mut response)?;
+
+        Ok(response)
+    
+    }
+
+}
+
 
 // Check if the daemon is active and listening. (any unixstream err is assumed not active)
 fn daemon_is_active() -> bool {
@@ -132,7 +220,10 @@ fn handle_start() {
 fn handle_stop() {
     print!("Stopping daemon...");
     stdout().flush().unwrap();
-    match write_to_daemon("quit") {
+    let q = ClientUDSocketMessage::new(SOCKET_PATH)
+                                    .body("quit")
+                                    .send();
+    match q {
         Err(e) => match e.kind() {
             ErrorKind::ConnectionRefused => print!(" Already stopped.\n"),
             _ => {
@@ -177,8 +268,11 @@ fn handle_pull(vals: Vec<&str>, overwrite: bool) {
             return;
         }
     }
-
-    write_to_daemon(format!("pull>{}>{}", vals[0], vals[1])).unwrap();
+    let cmd = format!("pull>{}>{}", vals[0], vals[1]);
+    ClientUDSocketMessage::new(SOCKET_PATH)
+                            .body(cmd)
+                            .send()
+                            .unwrap();
 }
 
 /// Handler for the file push command.
@@ -194,7 +288,11 @@ fn handle_push(p: &str) {
         return;
     }
     // Send push command to daemon.
-    write_to_daemon(format!("push>{}", p)).unwrap()
+    let cmd = format!("push>{}", p);
+    ClientUDSocketMessage::new(SOCKET_PATH)
+                            .body(cmd)
+                            .send()
+                            .unwrap();
 }
 
 /// Handler for the file status command.
@@ -285,8 +383,11 @@ fn handle_sync(vals: Vec<&str>) {
         fmt_err("sync_error", format!("Invalid pull url: {}", vals[1]));
         return;
     };
-
-    write_to_daemon(format!("sync>{}>{}", vals[0], vals[1])).unwrap();
+    let cmd = format!("sync>{}>{}", vals[0], vals[1]);
+    ClientUDSocketMessage::new(SOCKET_PATH)
+                            .body(cmd)
+                            .send()
+                            .unwrap();
 }
 
 /// Handler for manual unsync command.
@@ -299,7 +400,11 @@ fn handle_unsync(p: &str) {
         );
         return;
     }
-    write_to_daemon(format!("unsync>{}", p)).unwrap();
+    let cmd = format!("unsync>{}", p);
+    ClientUDSocketMessage::new(SOCKET_PATH)
+                            .body(cmd)
+                            .send()
+                            .unwrap();
 }
 
 fn main() {
@@ -396,7 +501,20 @@ fn main() {
 
     // Testing function, write a msg to the daemon.
     if let Some(m) = matches.value_of("msg") {
-        write_to_daemon(m).unwrap();
+        let msg = format!("msg>{}", m);
+        
+        let mut sock_msg = ClientUDSocketMessage::new(SOCKET_PATH)
+                                                    .body(msg);
+        if m.contains("ping") {
+            let mut sock_msg = sock_msg.expects_response(true);
+            sock_msg.send().unwrap();
+            let resp = sock_msg.wait_for_response().unwrap();
+
+            println!("{}", resp);
+        } else {
+            sock_msg.send().unwrap();
+        }
+        
     }
 
     // Handles push command.

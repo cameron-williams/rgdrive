@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::prelude::*;
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Error};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process;
 
@@ -38,13 +38,64 @@ fn get_stream_text(s: &mut UnixStream) -> String {
     resp
 }
 
+
+struct ServerUDSocketMessage {
+    stream: UnixStream,
+    _timeout: u64
+}
+
+impl ServerUDSocketMessage {
+
+    // Initialize self from existing UnixStream with default timeout.
+    fn from_stream(stream: UnixStream) -> ServerUDSocketMessage {
+        Self {
+            stream,
+            _timeout: 15,
+        }
+    }
+
+    fn set_timeout(self, t: u64) -> ServerUDSocketMessage {
+        Self {
+            _timeout: t,
+            ..self
+        }
+    }
+
+    // Get the message body from Stream.
+    fn get_body(&mut self) -> Result<String, Error> {
+        let mut body = String::new();
+        // Read timeout should never occur, but set it just in case.
+        self.stream.set_read_timeout(
+            Some(Duration::from_secs(self._timeout))
+        )?;
+        self.stream.read_to_string(&mut body)?;
+        Ok(body)
+    }
+
+    // Send a response on the current Stream.
+    fn send_response<M: Into<String>>(&mut self, m: M) -> Result<(), Error> {
+        let msg = m.into();
+        // Set 15s write timeout in case the client isn't reading for some reason.
+        self.stream.set_write_timeout(
+            Some(Duration::from_secs(self._timeout))
+        )?;
+        self.stream.write_all(msg.as_bytes())?;
+        Ok(())
+    }
+
+}
+
+
+
 fn handle_stream(
-    stream: &mut UnixStream,
+    stream: UnixStream,
     drive: Arc<Mutex<Drive>>,
     notify: Arc<Mutex<Inotify>>,
     tracked_files: Arc<Mutex<TrackedFiles>>,
 ) {
-    let text = get_stream_text(stream);
+    // Turn stream into a ServerUDSocketMessage.
+    let mut stream = ServerUDSocketMessage::from_stream(stream);
+    let text = stream.get_body().unwrap();
     if text.len() == 0 {
         return;
     }
@@ -55,10 +106,17 @@ fn handle_stream(
 
     // Match command to requested action.
     match cmd[0] {
+        "msg" => {
+            info!("Message received: {}", cmd[1]);
+            if cmd[1].contains("ping") {
+                stream.send_response("pong").unwrap();
+            }
+        },
+        
         "quit" => {
             info!("Quit command received. Quitting dameon.");
             process::exit(0);
-        }
+        },
 
         // Push: cmd[1] - local path (file or dir) to upload
         "push" => {
@@ -89,7 +147,7 @@ fn handle_stream(
                     Err(e) => {error!("failed to upload {}: {:?}", cmd[1], e); return;}
                 }
             }
-        }
+        },
 
         // Pull: cmd[1] - Drive url, cmd[2] - local path to download to
         "pull" => {
@@ -109,7 +167,7 @@ fn handle_stream(
                     return;
                 }
             }
-        }
+        },
 
         // Sync: cmd[1] - /path/locally, cmd[2] - drive_url
         "sync" => {
@@ -125,7 +183,7 @@ fn handle_stream(
             // Manually remove syncs that have specified local path.
             tracked_files.lock().unwrap().remove_path(notify, cmd[1]);
             info!("Sync removed for {}", cmd[1]);
-        }
+        },
 
         _ => (),
     }
@@ -216,43 +274,6 @@ fn inotify_listen(
     }
 }
 
-// // Represents a tracked path.
-// #[derive(Serialize, Deserialize)]
-// struct TrackedPath {
-//     drive_url: String,
-//     path: PathBuf,
-//     #[serde(skip)]
-//     wd: Option<WatchDescriptor>,
-// }
-
-// impl TrackedPath {
-
-//     fn new<P: Into<PathBuf>, U: Into<String>>(path: P, url: U) -> TrackedPath {
-//         TrackedPath {
-//             drive_url: url.into(),
-//             path: path.into(),
-//             wd: None
-//         }
-//     }
-
-//     // Adds self to Inotify watchlist. (This must be done every time object is loaded from save).
-//     fn add_to_watchlist(&mut self, n: Arc<Mutex<Inotify>>) {
-//         match n.lock()
-//                 .unwrap()
-//                 .add_watch(self.path.clone(), WatchMask::MODIFY | WatchMask::DELETE)
-//         {
-//             Ok(wd) => {
-//                 debug!("{:?} added to Inotify watchlist", self.path);
-//                 self.wd = Some(wd);
-//             },
-//             Err(e) => {
-//                 error!("failed to add {:?} to the Inotify watchlist: {:?}", self.path, e);
-//                 return;
-//             }
-//         }
-//     }
-
-// }
 
 struct TrackedFiles {
     // Holds {WD: String("path,drive_url")
@@ -424,7 +445,7 @@ fn main() {
         match stream {
             Ok(mut s) => {
                 handle_stream(
-                    &mut s,
+                    s,
                     Arc::clone(&drive),
                     Arc::clone(&inotify),
                     Arc::clone(&tracked_files),
