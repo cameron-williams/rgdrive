@@ -2,7 +2,7 @@ extern crate clap;
 use clap::{App, Arg};
 
 mod lib;
-use lib::{DCommand, DResult, DSocket, SOCKET_PATH, TrackedFile, CONFIG_PATH};
+use lib::{DCommand, DResult, DSocket, TrackedFile, CONFIG_PATH, SOCKET_PATH};
 
 use std::env;
 
@@ -14,13 +14,11 @@ use std::process::{Command, Stdio};
 use std::fs::File;
 use std::io::Error;
 
-
 const ANSI_GREEN: &str = "\x1B[32m";
 const ANSI_RED: &str = "\x1B[31m";
 const ANSI_BLUE: &str = "\x1B[34m";
 const ANSI_RESET: &str = "\x1B[0m";
 const STDERR_PATH: &str = "/tmp/rgdrived.err";
-
 
 // Gets the bin path of the daemon binary. (assumes it's in the same path as this bin).
 fn get_bin_path() -> String {
@@ -31,8 +29,6 @@ fn get_bin_path() -> String {
     String::from(pb.to_str().unwrap())
 }
 
-
-
 // Check if the daemon is active and listening. (any unixstream err is assumed not active)
 fn daemon_is_active() -> bool {
     if let Err(_) = UnixStream::connect(SOCKET_PATH) {
@@ -41,7 +37,6 @@ fn daemon_is_active() -> bool {
         true
     }
 }
-
 
 // Quick fmt function for errors. Pass an identifier (e.g "push_err" for push function) and the err msg and it will auto color and format.
 fn fmt_err<I: AsRef<str>, M: AsRef<str>>(identifier: I, message: M) {
@@ -58,19 +53,17 @@ fn fmt_err<I: AsRef<str>, M: AsRef<str>>(identifier: I, message: M) {
     );
 }
 
-
 // Maybe add as a method to DResult instead of a separate function? dresult.format()
 fn fmt_result(r: DResult) {
     match r {
         DResult::Ok(s) => {
             println!("{}OK:{} {}", ANSI_GREEN, ANSI_RESET, s);
-        },
+        }
         DResult::Err(e) => {
             eprintln!("{}ERR:{} {}", ANSI_RED, ANSI_RESET, e);
         }
     }
 }
-
 
 /// Starts the daemon process with proper settings.
 fn start_daemon() {
@@ -125,8 +118,6 @@ fn start_daemon() {
         println!("daemon already running");
     }
 }
-
-
 
 fn main() {
     // Todo maybe move app config to yaml file or something?
@@ -192,7 +183,6 @@ fn main() {
                 .help("Manually remove any syncs for given path.")
         )
         .get_matches();
-    
 
     let socket = DSocket::new(SOCKET_PATH);
 
@@ -220,37 +210,27 @@ fn main() {
 
     // Stops the daemon process.
     if matches.occurrences_of("stop") > 0 {
-        let result = socket.send_command(
-            DCommand::Quit
-        ).unwrap();
+        let result = socket.send_command(DCommand::Quit).unwrap();
         fmt_result(result);
         return;
-    }    
+    }
 
     // Testing function, write a msg to the daemon.
     if let Some(m) = matches.value_of("msg") {
         let msg = m.to_string();
         if m.contains("ping") {
-            fmt_result(
-                socket.send_command(
-                    DCommand::Message(msg)
-                ).unwrap()
-            );
+            fmt_result(socket.send_command(DCommand::Message(msg)).unwrap());
         } else {
-            socket.send_command_no_response(
-                DCommand::Message(msg)
-            ).unwrap();
+            socket
+                .send_command_no_response(DCommand::Message(msg))
+                .unwrap();
         }
     }
 
     // Handles push command.
     if let Some(p) = matches.value_of("push") {
         let path = PathBuf::from(p);
-        fmt_result(
-            socket.send_command(
-                DCommand::Push(path)
-            ).unwrap()
-        );
+        fmt_result(socket.send_command(DCommand::Push(path)).unwrap());
     }
 
     // Handles pull command.
@@ -258,13 +238,13 @@ fn main() {
         let vals: Vec<&str> = v.collect();
         let overwrite = matches.occurrences_of("overwrite") == 1;
         fmt_result(
-            socket.send_command(
-                DCommand::Pull(
+            socket
+                .send_command(DCommand::Pull(
                     vals[0].to_string(),
                     PathBuf::from(vals[1]),
                     overwrite,
-                )
-            ).unwrap()
+                ))
+                .unwrap(),
         );
     }
 
@@ -276,9 +256,9 @@ fn main() {
                 "{green}{:?}{end} {blue}->{end} {green}{:?}{end}",
                 tf.path,
                 tf.drive_url,
-                green=ANSI_GREEN,
-                blue=ANSI_BLUE,
-                end=ANSI_RESET
+                green = ANSI_GREEN,
+                blue = ANSI_BLUE,
+                end = ANSI_RESET
             );
         }
     }
@@ -287,23 +267,18 @@ fn main() {
     if let Some(v) = matches.values_of("sync") {
         let vals: Vec<&str> = v.collect();
         fmt_result(
-            socket.send_command(
-                DCommand::FSync(
-                    PathBuf::from(vals[0]),
-                    vals[1].to_string(),
-                )
-            ).unwrap()
+            socket
+                .send_command(DCommand::FSync(PathBuf::from(vals[0]), vals[1].to_string()))
+                .unwrap(),
         )
     }
 
     // Handle unsync command.
     if let Some(p) = matches.value_of("unsync") {
         fmt_result(
-            socket.send_command(
-                DCommand::FUnSync(
-                    PathBuf::from(p)
-                )
-            ).unwrap()
+            socket
+                .send_command(DCommand::FUnSync(PathBuf::from(p)))
+                .unwrap(),
         );
     }
 }
