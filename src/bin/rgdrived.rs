@@ -2,383 +2,280 @@
 #[macro_use]
 extern crate log;
 
+mod lib;
+use lib::{DCommand, DResult, Tracker, SOCKET_PATH};
+
+
 use std::env;
 use std::path::{Path, PathBuf};
 
 use std::fs;
-use std::fs::{create_dir_all, File, OpenOptions};
-use std::io::prelude::*;
-use std::io::{BufReader, BufWriter, Error};
+use std::io::Error;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process;
-
-use std::collections::{HashMap, HashSet};
 
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-// use serde::{Deserialize, Serialize};
 
 use google_api::Drive;
-use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
+use inotify::EventMask;
 
-const SOCKET_PATH: &str = "/tmp/rgdrive.sock";
-const CONFIG_PATH: &str = "/.config/cameron-williams/tracked_files";
 
-fn config_dir() -> PathBuf {
-    let mut dir = env::var("HOME").expect("$HOME not set");
-    dir.push_str(CONFIG_PATH);
-    PathBuf::from(dir)
+
+// Returns a list of all subpaths in given path. Recursive.
+fn get_subpaths(p: &PathBuf) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir(p).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            paths.extend(get_subpaths(&path));
+        } else if path.is_file() {
+            paths.push(path);
+        }
+    }
+    paths
 }
 
-fn get_stream_text(s: &mut UnixStream) -> String {
-    let mut resp = String::new();
-    s.read_to_string(&mut resp).unwrap();
-    resp
-}
 
-struct ServerUDSocketMessage {
-    stream: UnixStream,
-    _timeout: u64,
-}
-
-impl ServerUDSocketMessage {
-    // Initialize self from existing UnixStream with default timeout.
-    fn from_stream(stream: UnixStream) -> ServerUDSocketMessage {
-        Self {
-            stream,
-            _timeout: 15,
+fn pull(drive_url: String, path: PathBuf, overwrite: bool, tracker: Arc<Mutex<Tracker>>, drive: Arc<Mutex<Drive>>) -> Result<DResult, Error> {
+    // Check if destination path exists, if it does check if we can overwrite it.
+    if path.is_file() {
+        if path.exists() && !overwrite {
+            return Ok(
+                DResult::error(
+                    format!("Destination {:?} exists but no overwrite flag specified. Rerun with --overwrite to force destination path overwrite.", path)
+                )
+            );
+        }
+    } else {
+        // Is a dir and doesn't exist, return err.
+        if path.extension() == None && !path.is_dir() {
+            return Ok(
+                DResult::error(format!("Destiation {:?} doesn't exist.", path))
+            )
         }
     }
 
-    fn set_timeout(self, t: u64) -> ServerUDSocketMessage {
-        Self {
-            _timeout: t,
-            ..self
+    match drive.lock().unwrap().download_file(&drive_url, path) {
+        Ok(path) => {
+            info!("Downloaded {} successfully.", drive_url);
+            // Add path to tracker.
+            tracker.lock().unwrap().add_path(path, &drive_url)?;
+            Ok(
+                DResult::ok(format!("Pulled {} successfully.", drive_url))
+            )
+        },
+        Err(e) => {
+            error!("Error downloading {}: {:?}", drive_url, e);
+            Ok(
+                DResult::error(
+                    format!("Error downloading {}: {:?}. See log for more information,", drive_url, e)
+                )
+            )
         }
     }
 
-    // Get the message body from Stream.
-    fn get_body(&mut self) -> Result<String, Error> {
-        let mut body = String::new();
-        // Read timeout should never occur, but set it just in case.
-        self.stream
-            .set_read_timeout(Some(Duration::from_secs(self._timeout)))?;
-        self.stream.read_to_string(&mut body)?;
-        Ok(body)
-    }
-
-    // Send a response on the current Stream.
-    fn send_response<M: Into<String>>(&mut self, m: M) -> Result<(), Error> {
-        let msg = m.into();
-        // Set 15s write timeout in case the client isn't reading for some reason.
-        self.stream
-            .set_write_timeout(Some(Duration::from_secs(self._timeout)))?;
-        self.stream.write_all(msg.as_bytes())?;
-        Ok(())
-    }
 }
 
-fn handle_stream(
-    stream: UnixStream,
-    drive: Arc<Mutex<Drive>>,
-    notify: Arc<Mutex<Inotify>>,
-    tracked_files: Arc<Mutex<TrackedFiles>>,
-) {
-    // Turn stream into a ServerUDSocketMessage.
-    let mut stream = ServerUDSocketMessage::from_stream(stream);
-    let text = stream.get_body().unwrap();
-    if text.len() == 0 {
+
+// Push given path to Google Drive, and add it to the Inotify watchlist.
+fn push(path: PathBuf, tracker: Arc<Mutex<Tracker>>, drive: Arc<Mutex<Drive>>) -> Result<DResult, Error> {
+    if !path.exists() {
+        return Ok(
+            DResult::error(format!("Cannot push path: {:?} does not exist.", path))
+        )
+    }
+
+    // If given path is a dir, upload everything in it.
+    if path.is_dir() {
+        let (mut success, mut error): (u16, u16) = (0, 0);
+        // Get all subpaths of given dir. Attempt to add them all and keep track of # fails/successes.
+        for p in get_subpaths(&path) {
+            match drive.lock().unwrap().upload_file(&p) {
+                Ok(url) => {
+                    info!("Uploaded {:?}: {:?}", p, url);
+                    match tracker.lock().unwrap()
+                            .add_path(&p, &url) {
+                                Ok(_) => {
+                                    info!("Added {:?} to tracker", p);
+                                    success += 1;
+                                },
+                                Err(e) => {
+                                    error!("Error adding {:?} to tracker: {:?}", p, e);
+                                    error += 1;
+                                }
+                            }
+                },
+                Err(e) => {
+                    error!("Error pushing {:?}: {:?}", p, e);
+                    error += 1;
+                    continue
+                }
+            }
+        }
+        let result_msg = format!("Directory upload status: {} successes, {} fails.", success, error);
+        if error > 0 {
+            return Ok(DResult::error(result_msg))
+        }
+        return Ok(DResult::ok(result_msg))
+
+    // Single file path, upload it.
+    } else {
+
+        match drive.lock().unwrap().upload_file(&path) {
+            Ok(url) => {
+                info!("Uploaded {:?}: {:?}", path, url);
+                match tracker.lock().unwrap().add_path(&path, &url) {
+                    Ok(_) => {
+                        info!("Added {:?} to tracked files.", path);
+                        return Ok(DResult::ok(format!("Uploaded and synced {:?}.", path)));
+                    },
+                    Err(e) => {
+                        error!("Error adding {:?} to tracked files: {:?}.", path, e);
+                        return Ok(DResult::error(format!("Error uploading and syncing {:?}: {:?}", path, e)));
+                    }
+                }
+            },
+            Err(e) => {
+                let emsg = format!("Failed to upload {:?}: {:?}", path, e);
+                error!("{}", emsg);
+                return Ok(DResult::error(emsg));
+            }
+        }
+    }
+
+}
+
+// Handle each incoming stream. Deserialize command and perform it. 
+fn handle_stream(mut stream: UnixStream, tracker: Arc<Mutex<Tracker>>, drive: Arc<Mutex<Drive>>) {
+    // Deserialize command from stream.
+    let command: DCommand = DCommand::from_stream(&mut stream);
+
+    // Something with the udsockets causes empty bytes to be sent sometimes, dismiss any empty commands now.
+    if let DCommand::None = command {
         return;
     }
-    let cmd: Vec<&str> = text.split(">").collect();
-    debug!("Cmd: {:?}", cmd);
 
-    let drive = drive.lock().unwrap();
+    debug!("Got command: {:?}", command);
 
-    // Match command to requested action.
-    match cmd[0] {
-        "msg" => {
-            info!("Message received: {}", cmd[1]);
-            if cmd[1].contains("ping") {
-                stream.send_response("pong").unwrap();
+    // Match command to command handler.
+    match command {
+
+        // Handle message command.
+        DCommand::Message(msg) => {
+            info!("Message from client: {:?}", msg);
+            if msg.contains("ping") {
+                DResult::Ok(String::from("pong")).send(&mut stream).unwrap();
             }
-        }
-        "quit" => {
-            info!("Quit command received. Quitting dameon.");
+        },
+
+        // Handles the file pull command.
+        DCommand::Pull(drive_url, path, overwrite) => {
+            match pull(drive_url, path, overwrite, tracker, drive) {
+                Ok(r) => r.send(&mut stream).unwrap(),
+                Err(e) => {
+                    error!("Unrecoverable pull error: {:?}", e);
+                }
+            }
+        },
+
+        DCommand::Push(path) => {
+            match push(path, tracker, drive) {
+                Ok(r) => r.send(&mut stream).unwrap(),
+                Err(e) => {
+                    error!("Unrecoverable push error: {:?}", e);
+                }
+            }
+        },
+
+        DCommand::FSync(path, drive_url) => {
+            match tracker.lock().unwrap().add_path(&path, &drive_url) {
+                Ok(_) => {
+                    let msg = format!("Manual sync added for {:?} -> {:?}", &path, &drive_url);
+                    info!("{}", msg);
+                    DResult::ok(msg).send(&mut stream).unwrap();
+                },
+                Err(e) => {
+                    let emsg = format!("Failed to add manual sync for {:?} -> {:?}: {:?}", &path, &drive_url, e);
+                    error!("{}", emsg);
+                    DResult::error(emsg).send(&mut stream).unwrap();
+                }
+
+            }
+        },
+
+        DCommand::FUnSync(path) => {
+            match tracker.lock().unwrap().remove_path(&path) {
+                Ok(_) => {
+                    let msg = format!("Removed sync for {:?}", &path);
+                    info!("{}", msg);
+                    DResult::ok(msg).send(&mut stream).unwrap();
+                },
+                Err(e) => {
+                    let emsg = format!("Error removing sync for {:?}: {:?}", &path, e);
+                    error!("{}", emsg);
+                    DResult::error(emsg).send(&mut stream).unwrap();
+                }
+            }
+        },
+
+        // Handle quit command.
+        DCommand::Quit => {
+            info!("Received quit command from client. Quitting..");
+            DResult::Ok(
+                String::from("Daemon stopped.")
+            ).send(&mut stream).unwrap();
             process::exit(0);
         }
-
-        // Push: cmd[1] - local path (file or dir) to upload
-        "push" => {
-            debug!("Push command received: {:?}", cmd);
-            let upload_path = PathBuf::from(cmd[1]);
-
-            // If given path is a dir, upload everything in it.
-            if upload_path.is_dir() {
-                for f in upload_path.read_dir().unwrap() {
-                    let path = f.unwrap().path();
-                    match drive.upload_file(&path) {
-                        Ok(url) => {
-                            info!("Uploaded {:?}", path.to_str());
-                            tracked_files.lock().unwrap().add_path(
-                                Arc::clone(&notify),
-                                path.to_str().unwrap(),
-                                url,
-                            )
-                        }
-                        Err(e) => {
-                            error!("Failed to upload {:?}: {:?}", path, e);
-                            continue;
-                        }
-                    }
-                }
-            } else {
-                match drive.upload_file(&upload_path) {
-                    Ok(url) => {
-                        info!("Uploaded {:?}", upload_path);
-                        tracked_files.lock().unwrap().add_path(notify, cmd[1], url);
-                    }
-                    Err(e) => {
-                        error!("failed to upload {}: {:?}", cmd[1], e);
-                        return;
-                    }
-                }
-            }
-        }
-
-        // Pull: cmd[1] - Drive url, cmd[2] - local path to download to
-        "pull" => {
-            debug!("Pull command received: {:?}", cmd);
-            let path = PathBuf::from(cmd[2]);
-
-            // Attempt to download file from Drive.
-            match drive.download_file(cmd[1], path) {
-                Ok(path) => {
-                    info!("downloaded {} successfully", cmd[1]);
-                    let path = path.to_str().unwrap();
-                    // On successful download, add path to TrackedFile for modify/delete masks.
-                    tracked_files.lock().unwrap().add_path(notify, path, cmd[1]);
-                }
-                Err(e) => {
-                    error!("failed to download {}: {:?}", cmd[1], e);
-                    return;
-                }
-            }
-        }
-
-        // Sync: cmd[1] - /path/locally, cmd[2] - drive_url
-        "sync" => {
-            // Manually adds a synced file between specified path/drive_url.
-            tracked_files
-                .lock()
-                .unwrap()
-                .add_path(notify, cmd[1], cmd[2]);
-            info!("Sync added for {} -> {}", cmd[1], cmd[2]);
-        }
-
-        "unsync" => {
-            // Manually remove syncs that have specified local path.
-            tracked_files.lock().unwrap().remove_path(notify, cmd[1]);
-            info!("Sync removed for {}", cmd[1]);
-        }
-
-        _ => (),
-    }
+        _ => {},
+    }    
 }
 
-/// Write paths that need to be tracked to config file from TrackedFiles map (HashMap<wd, String>)
-/// Inotify watched paths do not persist through sessions. As such we need a way to save tracked paths
-/// throughout any number of sessions. To do this we keep a mirrored list in a file of all paths that are
-/// tracked. Whenever a path is tracked, it's written to the file, and when one is removed it will also be removed
-/// from the file.
-///
-/// Since we need to save the drive id/url as well as the local path, the format for storing tracked files
-fn write_saved_inotify_events(e: &HashMap<WatchDescriptor, String>) {
-    // Ensure config path exists. If it doesn't create it.
-    let path = config_dir();
-    if !path.exists() {
-        match create_dir_all(path.parent().unwrap()) {
-            Ok(_) => {
-                if let Err(e) = File::create(&path) {
-                    panic!(format!("failed to create new config file: {:#?}", e));
-                }
-            }
-            Err(e) => panic!(format!("failed to create config dir: {:#?}", e)),
-        }
-    }
-    let mut vals = Vec::new();
-    e.values().for_each(|i| vals.push(i));
-    match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
-    {
-        Ok(f) => {
-            let writer = BufWriter::new(f);
-            if let Err(e) = serde_json::to_writer_pretty(writer, &vals) {
-                panic!(format!(
-                    "error writing/serializing config to file: {:#?}",
-                    e
-                ));
-            }
-        }
-        Err(e) => panic!(format!("error opening config file in write mode: {:#?}", e)),
-    }
-}
+
 
 /// Listens forever for inotify events.
 fn inotify_listen(
-    notify: Arc<Mutex<Inotify>>,
+    tracker: Arc<Mutex<Tracker>>,
     drive: Arc<Mutex<Drive>>,
-    tracked_files: Arc<Mutex<TrackedFiles>>,
 ) {
     let mut buffer = [0; 1024];
     debug!("waiting for events..");
     loop {
-        let events = notify
+        let events = tracker
             .lock()
             .unwrap()
+            .inotify
             .read_events(&mut buffer)
             .expect("Failed to read inotify events");
 
         for event in events {
             match event.mask {
+                // Handle modify events. Find file associated with wd and update it on drive.
                 EventMask::MODIFY => {
-                    let entry = tracked_files.lock().unwrap();
-                    let path: Vec<&str> = match entry.map.get(&event.wd) {
-                        Some(p) => p.split(",").collect(),
-                        None => {
-                            error!("no matching entry in saved wds for {:?}", event.wd);
-                            continue;
+                    for tf in &tracker.lock().unwrap().tracked_files {
+                        if let Some(wd) = &tf.wd {
+                            if *wd == event.wd {
+                                match drive.lock()
+                                            .unwrap()
+                                            .update_file(tf.path.clone(), &tf.drive_url) {
+                                                Ok(_) => info!("Successfully updated file: {:?}", &tf.path),
+                                                Err(e) => error!("Error updating file {:?} : {:?}", &tf.path, e),
+                                            }
+                            }
                         }
-                    };
-                    debug!("modify event: {:#?}\nEntry: {:#?}", event.wd, path);
-                    match drive
-                        .lock()
-                        .unwrap()
-                        .update_file(PathBuf::from(path[0]), path[1])
-                    {
-                        Ok(_) => info!("Successfully updated file: {:?}", path),
-                        Err(e) => error!("Error updating file {:?}: {:?}", path, e),
                     }
                 }
                 EventMask::DELETE => {}
                 _ => {}
             }
         }
+        // debug!("Checking for events...");
         thread::sleep(Duration::from_millis(500));
     }
 }
 
-struct TrackedFiles {
-    // Holds {WD: String("path,drive_url")
-    map: HashMap<WatchDescriptor, String>,
-}
-
-impl TrackedFiles {
-    // Init tracked files, loading any from saved config.
-    fn from_config(notify: Arc<Mutex<Inotify>>) -> Self {
-        // Ensure config path exists. If it doesn't create it and return a blank value
-        let path = config_dir();
-        if !path.exists() {
-            match create_dir_all(path.parent().unwrap()) {
-                Ok(_) => {
-                    if let Err(e) = File::create(&path) {
-                        panic!(format!("failed to create new config file: {:#?}", e));
-                    }
-                }
-                Err(e) => panic!(format!("failed to create config dir: {:#?}", e)),
-            }
-        }
-        // Open file as readonly, and read vec of pathnames from file.
-        let paths: HashSet<String> = match OpenOptions::new()
-            .read(true)
-            .write(false)
-            .open(config_dir())
-        {
-            Ok(f) => {
-                let reader = BufReader::new(f);
-                match serde_json::from_reader(reader) {
-                    Ok(d) => d,
-                    Err(_) => HashSet::new(),
-                }
-            }
-            Err(e) => panic!(format!("error reading from config file: {:#?}", e)),
-        };
-
-        let mut map: HashMap<WatchDescriptor, String> = HashMap::new();
-
-        for p in &paths {
-            let vals: Vec<&str> = p.split(",").collect();
-            match notify
-                .lock()
-                .unwrap()
-                .add_watch(vals[0], WatchMask::MODIFY | WatchMask::DELETE)
-            {
-                Ok(wd) => {
-                    debug!("{} added to Inotify watchlist successfully", p);
-                    map.insert(wd, p.to_string())
-                }
-                Err(e) => {
-                    error!("failed to add {} to the Inotify watchlist: {:?}", p, e);
-                    continue;
-                }
-            };
-        }
-        debug!("{:#?}", map);
-
-        Self { map }
-    }
-
-    /// Adds given path to Inotify watch, as well as tracked files map.
-    fn add_path<P: Into<String>, U: Into<String>>(
-        &mut self,
-        notify: Arc<Mutex<Inotify>>,
-        path: P,
-        url: U,
-    ) {
-        let path = path.into();
-        let url = url.into();
-        match notify
-            .lock()
-            .unwrap()
-            .add_watch(path.clone(), WatchMask::MODIFY | WatchMask::DELETE)
-        {
-            Ok(wd) => {
-                debug!("{} added to Inotify watchlist successfully", path);
-                self.map.insert(wd, format!("{},{}", path, url));
-            }
-            Err(e) => {
-                error!("failed to add {} to the Inotify watchlist: {:?}", path, e);
-                return;
-            }
-        }
-        write_saved_inotify_events(&self.map)
-    }
-
-    /// Removes any inotify watches that include given path.
-    fn remove_path<P: Into<String>>(&mut self, notify: Arc<Mutex<Inotify>>, p: P) {
-        let path = p.into();
-
-        // Find entries to remove, and remove them. Todo:// find a better way to do this because I can't figure out a better way
-        // to remove a key from a dict/remove it from the watcher by checking to see if values match.
-        let mut _map: HashMap<WatchDescriptor, String> = HashMap::new();
-        for (wd, v) in self.map.drain() {
-            if v.contains(&path) {
-                // todo change from unwrap to handling error
-                notify.lock().unwrap().rm_watch(wd).unwrap();
-                debug!("{} removed from Inotify watchlist successfully", v);
-            } else {
-                _map.insert(wd, v);
-            }
-        }
-        self.map.extend(_map);
-        write_saved_inotify_events(&self.map);
-    }
-}
 
 fn main() {
     env_logger::init();
@@ -388,7 +285,7 @@ fn main() {
         fs::remove_file(&socket).unwrap()
     }
 
-    // Create unix domain socket on SOCKET_PATH.
+    // Create unix domain socket listener on SOCKET_PATH.
     let listener = match UnixListener::bind(&socket) {
         Ok(s) => s,
         Err(e) => {
@@ -396,7 +293,7 @@ fn main() {
             return;
         }
     };
-    info!("Daemon initialized");
+    info!("Daemon initialized.");
 
     // Initialize gdrive api client.
     let drive = match Drive::new(
@@ -414,28 +311,14 @@ fn main() {
         }
     };
 
-    // Initialize inotify wrapper for adding new watches.
-    let inotify: Arc<Mutex<Inotify>> = match Inotify::init() {
-        Ok(i) => Arc::new(Mutex::new(i)),
-        Err(e) => {
-            error!(
-                "Error initializing Inotify wrapped: {:#?}. Unable to continue",
-                e
-            );
-            process::exit(1);
-        }
-    };
-
-    // Holds all tracked paths.
-    let tracked_files = Arc::new(Mutex::new(TrackedFiles::from_config(Arc::clone(&inotify))));
+    // Tracker hold inotify, and ensures that tracked files exist between sessions.
+    let tracker = Arc::new(Mutex::new(Tracker::init()));
 
     // Spawn a new thread which listens for and handles Inotify events.
-    let inotify_clone = Arc::clone(&inotify);
+    let tracker_clone = Arc::clone(&tracker);
     let drive_clone = Arc::clone(&drive);
-    let tracked_files_c = Arc::clone(&tracked_files);
-
     thread::spawn(move || {
-        inotify_listen(inotify_clone, drive_clone, tracked_files_c);
+        inotify_listen(tracker_clone, drive_clone);
     });
 
     // Listen for and handle incoming streams on the socket.
@@ -444,9 +327,8 @@ fn main() {
             Ok(mut s) => {
                 handle_stream(
                     s,
+                    Arc::clone(&tracker),
                     Arc::clone(&drive),
-                    Arc::clone(&inotify),
-                    Arc::clone(&tracked_files),
                 );
             }
             Err(e) => {
