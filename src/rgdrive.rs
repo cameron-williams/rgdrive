@@ -68,7 +68,7 @@ fn fmt_result(r: DResult) {
 
 /// Starts the daemon process with proper settings.
 fn start_daemon() {
-    println!("Starting daemon.");
+    
     // Ensure client id and secret are set in $ENV.
     let (client_id, secret) = match (
         env::var("GOOGLE_CLIENT_ID"),
@@ -115,6 +115,7 @@ fn start_daemon() {
                 .spawn()
                 .expect("failed to init command");
         }
+        println!("{}OK:{} Daemon started.", ANSI_GREEN, ANSI_RESET);
     } else {
         println!("daemon already running");
     }
