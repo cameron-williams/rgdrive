@@ -2,7 +2,7 @@ extern crate clap;
 use clap::{App, Arg};
 
 mod lib;
-use lib::{DCommand, DResult, DSocket, TrackedFile, config_dir, SOCKET_PATH};
+use lib::{config_dir, DCommand, DResult, DSocket, TrackedFile, SOCKET_PATH};
 
 use std::env;
 
