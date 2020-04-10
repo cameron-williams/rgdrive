@@ -181,6 +181,7 @@ fn handle_stream(mut stream: UnixStream, tracker: Arc<Mutex<Tracker>>, drive: Ar
                 Ok(r) => r.send(&mut stream).unwrap(),
                 Err(e) => {
                     error!("Unrecoverable pull error: {:?}", e);
+                    DResult::error(format!("{}", e)).send(&mut stream).unwrap();
                 }
             }
         }
@@ -189,6 +190,7 @@ fn handle_stream(mut stream: UnixStream, tracker: Arc<Mutex<Tracker>>, drive: Ar
             Ok(r) => r.send(&mut stream).unwrap(),
             Err(e) => {
                 error!("Unrecoverable push error: {:?}", e);
+                DResult::error(format!("{}", e)).send(&mut stream).unwrap();
             }
         },
 
@@ -268,8 +270,25 @@ fn inotify_listen(tracker: Arc<Mutex<Tracker>>, drive: Arc<Mutex<Drive>>) {
                         }
                     }
                 }
-                EventMask::DELETE => {}
-                _ => {}
+                // Handles delete events. For now expected behaviour on a local file delete is just to remove the sync on it, not delete it on drive.
+                EventMask::DELETE => {
+                    for tf in &tracker.lock().unwrap().tracked_files {
+                        if let Some(wd) = &tf.wd {
+                            if *wd == event.wd {
+                                match tracker.lock().unwrap().remove_path(&tf.path) {
+                                    Ok(_) => {
+                                        info!("{:?} was deleted locally, removing sync.", tf.path);
+                                    },
+                                    Err(e) => {
+                                        error!("{:?} was deleted locally, failed to remove sync: {:?}", tf.path, e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Skip all other events.
+                _ => {},
             }
         }
         // debug!("Checking for events...");

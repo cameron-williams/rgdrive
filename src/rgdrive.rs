@@ -2,7 +2,7 @@ extern crate clap;
 use clap::{App, Arg};
 
 mod lib;
-use lib::{DCommand, DResult, DSocket, TrackedFile, CONFIG_PATH, SOCKET_PATH};
+use lib::{DCommand, DResult, DSocket, TrackedFile, config_dir, SOCKET_PATH};
 
 use std::env;
 
@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use std::fs::File;
+use std::io::prelude::*;
 use std::io::Error;
 
 const ANSI_GREEN: &str = "\x1B[32m";
@@ -163,6 +164,12 @@ fn main() {
                 .help("Optional flag to overwrite file contents when pulling a file if it already exists.")
         )
         .arg(
+            Arg::with_name("log")
+                .long("log")
+                .takes_value(false) // maybe change to take a value to limit log lines? --log 5 -> last 5 log lines
+                .help("Optional flag to display daemon log.")
+        )
+        .arg(
             Arg::with_name("list")
                 .long("list")
                 .takes_value(false)
@@ -195,7 +202,19 @@ fn main() {
 
     // Print current daemon status and daemon logs to stdout.
     if matches.occurrences_of("status") > 0 {
-        // handle_status();
+        let status = match socket.is_active() {
+            true => format!("{}running{}", ANSI_GREEN, ANSI_RESET),
+            false => format!("{}stopped{}", ANSI_RED, ANSI_RESET),
+        };
+        println!("Daemon status: {}", status);
+        return;
+    }
+
+    if matches.occurrences_of("log") > 0 {
+        let mut f: File = File::open(STDERR_PATH).unwrap();
+        let mut lines: String = String::new();
+        f.read_to_string(&mut lines).unwrap();
+        println!("{}", lines);
         return;
     }
 
@@ -251,7 +270,9 @@ fn main() {
     // Handles list command.
     if matches.occurrences_of("list") > 0 {
         // Iterate all Trackedfiles and prettyprint them.
-        for tf in &TrackedFile::from_path(CONFIG_PATH) {
+        let files = TrackedFile::from_path(config_dir());
+        println!("Synced files:");
+        for tf in &files {
             println!(
                 "{green}{:?}{end} {blue}->{end} {green}{:?}{end}",
                 tf.path,

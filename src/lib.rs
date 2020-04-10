@@ -19,7 +19,7 @@ use inotify::{Inotify, WatchDescriptor, WatchMask};
 pub const SOCKET_PATH: &str = "/tmp/rgdrive.sock";
 pub const CONFIG_PATH: &str = "/.config/cameron-williams/tracked_files";
 
-fn config_dir() -> PathBuf {
+pub fn config_dir() -> PathBuf {
     let mut dir = env::var("HOME").expect("$HOME not set");
     dir.push_str(CONFIG_PATH);
     PathBuf::from(dir)
@@ -213,7 +213,7 @@ impl Tracker {
         // Open tracked files path. Create new so that it erases any existing paths, since they could have been changed or removed since the last time we accessed the file.
         let mut f = OpenOptions::new()
                                 .write(true)
-                                .create_new(true)
+                                .truncate(true)
                                 .open(&self.tracked_files_path)?;    
         // Serialize the tracked files vec and write it to the file.
         f.write_all(
@@ -235,7 +235,10 @@ impl Tracker {
 
         // Add path to inotify watchlist for specific WatchMasks.
         let wd = match self.inotify.add_watch(&path, WatchMask::MODIFY | WatchMask::DELETE_SELF | WatchMask::MOVE_SELF) {
-            Ok(wd) => wd,
+            Ok(wd) => {
+                log::debug!("added {:?} to the watchlist", wd);
+                wd
+            },
             Err(e) => {
                 log::error!("Failed to add {:?}{:?} to the inotify watchlist: {:?}", path, url, e);
                 return Err(e);
@@ -300,8 +303,10 @@ impl TrackedFile {
         f.read_to_end(&mut buf).unwrap();
         
         // Deserialize file to Vec<Trackedfile>
-        let tracked_files: Vec<TrackedFile> = match bincode::deserialize(&buf) {
-            Ok(v) => return v,
+        match bincode::deserialize(&buf) {
+            Ok(v) => {
+                return v
+            },
             Err(e) => {
                 log::warn!("Error deserializing from file: {:?}.. Continuing anyways with a blank tracker.", e);
                 return Vec::new()
